@@ -1,0 +1,19 @@
+{% extends "base.html" %}
+{% block title %}PulseWatch — мониторинг сайтов{% endblock %}
+{% block content %}
+<section class="hero">
+    <p class="eyebrow">PYTHON UPTIME MONITOR</p>
+    <h1>Узнай о сбое раньше пользователей</h1>
+    <p class="hero-text">PulseWatch проверяет доступность сайтов, сохраняет время ответа и показывает историю работы.</p>
+    <div class="actions">
+        <a class="button" href="/register">Начать мониторинг</a>
+        <a class="button secondary" href="/login">У меня есть аккаунт</a>
+    </div>
+</section>
+<section class="feature-grid">
+    <article><span>01</span><h2>Проверки</h2><p>HTTP-проверки по заданному интервалу.</p></article>
+    <article><span>02</span><h2>История</h2><p>Статусы и время ответа в одном месте.</p></article>
+    <article><span>03</span><h2>Безопасность</h2><p>Защита от запросов во внутреннюю сеть.</p></article>
+</section>
+{% endblock %}
+

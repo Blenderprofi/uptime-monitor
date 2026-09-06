@@ -1,0 +1,38 @@
+{% extends "base.html" %}
+{% block title %}Панель — PulseWatch{% endblock %}
+{% block content %}
+<div class="page-heading">
+    <div><p class="eyebrow">ОБЗОР</p><h1>Твои сайты</h1></div>
+    <a class="button" href="/monitors/new">Добавить сайт</a>
+</div>
+
+<section class="stats">
+    <div><strong>{{ monitors|length }}</strong><span>Всего</span></div>
+    <div><strong class="green">{{ available }}</strong><span>Доступны</span></div>
+    <div><strong class="red">{{ unavailable }}</strong><span>Недоступны</span></div>
+</section>
+
+{% if monitors %}
+<section class="monitor-list">
+    {% for monitor in monitors %}
+    <a class="monitor-card" href="/monitors/{{ monitor.id }}">
+        <span class="status-dot {% if monitor.last_available is sameas true %}up{% elif monitor.last_available is sameas false %}down{% endif %}"></span>
+        <div class="monitor-main">
+            <h2>{{ monitor.name }}</h2><p>{{ monitor.url }}</p>
+        </div>
+        <div class="monitor-meta">
+            {% if monitor.last_status_code %}<strong>HTTP {{ monitor.last_status_code }}</strong>{% else %}<strong>Не проверен</strong>{% endif %}
+            <span>каждые {{ monitor.interval_seconds }} сек.</span>
+        </div>
+    </a>
+    {% endfor %}
+</section>
+{% else %}
+<section class="empty-state">
+    <h2>Пока нет сайтов</h2>
+    <p>Добавь первый URL и запусти проверку.</p>
+    <a class="button" href="/monitors/new">Добавить сайт</a>
+</section>
+{% endif %}
+{% endblock %}
+

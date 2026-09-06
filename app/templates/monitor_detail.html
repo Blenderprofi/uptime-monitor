@@ -1,0 +1,48 @@
+{% extends "base.html" %}
+{% block title %}{{ monitor.name }} — PulseWatch{% endblock %}
+{% block content %}
+<div class="page-heading">
+    <div>
+        <a class="back-link" href="/dashboard">← Все сайты</a>
+        <h1>{{ monitor.name }}</h1><a class="url" href="{{ monitor.url }}" target="_blank" rel="noreferrer">{{ monitor.url }}</a>
+    </div>
+    <div class="actions">
+        <form method="post" action="/monitors/{{ monitor.id }}/check">
+            <input type="hidden" name="csrf" value="{{ csrf_token }}"><button class="button" type="submit">Проверить сейчас</button>
+        </form>
+        <form method="post" action="/monitors/{{ monitor.id }}/toggle">
+            <input type="hidden" name="csrf" value="{{ csrf_token }}"><button class="button secondary" type="submit">{% if monitor.is_active %}Пауза{% else %}Запустить{% endif %}</button>
+        </form>
+    </div>
+</div>
+
+<section class="stats detail-stats">
+    <div><strong class="{% if monitor.last_available is sameas true %}green{% elif monitor.last_available is sameas false %}red{% endif %}">{% if monitor.last_available is sameas true %}UP{% elif monitor.last_available is sameas false %}DOWN{% else %}—{% endif %}</strong><span>Статус</span></div>
+    <div><strong>{% if monitor.last_status_code %}{{ monitor.last_status_code }}{% else %}—{% endif %}</strong><span>HTTP-код</span></div>
+    <div><strong>{% if uptime is not none %}{{ uptime }}%{% else %}—{% endif %}</strong><span>Uptime</span></div>
+</section>
+
+<section class="history">
+    <div class="section-heading"><h2>Последние проверки</h2><span>до 50 записей</span></div>
+    {% if check_rows %}
+    <div class="table-wrap"><table>
+        <thead><tr><th>Время</th><th>Статус</th><th>Ответ</th><th>Задержка</th></tr></thead>
+        <tbody>
+        {% for row in check_rows %}
+        <tr>
+            <td>{{ row.check.checked_at.strftime('%d.%m.%Y %H:%M:%S') }}</td>
+            <td><span class="pill {% if row.check.is_available %}pill-up{% else %}pill-down{% endif %}">{% if row.check.is_available %}UP{% else %}DOWN{% endif %}</span></td>
+            <td>{% if row.check.status_code %}HTTP {{ row.check.status_code }}{% else %}{{ row.check.error_message or 'Ошибка' }}{% endif %}</td>
+            <td class="latency">{% if row.check.response_time_ms is not none %}<div><span style="width: {{ row.bar_width }}%"></span></div>{{ row.check.response_time_ms }} ms{% else %}—{% endif %}</td>
+        </tr>
+        {% endfor %}
+        </tbody>
+    </table></div>
+    {% else %}<div class="empty-small">Проверок пока нет.</div>{% endif %}
+</section>
+
+<form method="post" action="/monitors/{{ monitor.id }}/delete" onsubmit="return confirm('Удалить монитор и всю историю?')" class="danger-zone">
+    <input type="hidden" name="csrf" value="{{ csrf_token }}"><button class="danger-button" type="submit">Удалить монитор</button>
+</form>
+{% endblock %}
+
