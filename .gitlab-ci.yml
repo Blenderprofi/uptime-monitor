@@ -11,6 +11,7 @@ app:
     - pip --version
     - python --version
     - pip install -r requirements.txt
+    - pip install -r requirements-dev.txt
     - python manage.py test
     - python -c "import fastapi; import uvicorn; import psycopg2; import redis; import rq; import celery; import sqlalchemy; print('All dependencies are installed and importable')"
 
