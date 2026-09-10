@@ -1,65 +1,191 @@
 # PulseWatch
 
-Учебный сервис мониторинга доступности сайтов на Python. Пользователь добавляет URL, запускает проверки и видит историю HTTP-статусов и времени ответа.
+PulseWatch is a Python uptime-monitoring service that checks website availability, records HTTP status codes and response times, and displays monitoring history through a web dashboard.
 
-## Возможности
+This repository is used as a DevOps portfolio project. The FastAPI application serves as the workload, while my contribution focuses on containerization, multi-service orchestration, database integration, CI/CD, operational reliability, security, and infrastructure automation.
 
-- регистрация и вход через cookie-сессию;
-- отдельные мониторы для каждого пользователя;
-- ручные и фоновые HTTP-проверки;
-- история проверок и расчёт uptime;
-- пауза и удаление монитора;
-- блокировка локальных IP-адресов для снижения риска SSRF;
-- health endpoint `GET /api/health`;
-- JSON-список мониторов `GET /api/monitors`.
+## Features
 
-## Запуск
+- User registration and cookie-based authentication
+- User-specific website monitors
+- Manual and scheduled HTTP checks
+- Response-time and uptime history
+- Monitor pause and deletion controls
+- Basic SSRF protection that blocks private and local network targets
+- Health endpoint at `GET /api/health`
+- Authenticated monitor API at `GET /api/monitors`
 
-Требуется Python 3.11 или новее.
+## Architecture
 
-```powershell
-python -m venv .venv
-.venv\Scripts\Activate.ps1
+```mermaid
+flowchart LR
+    User[Browser / API client] -->|HTTP :8080| Web[FastAPI web service]
+    Web --> DB[(PostgreSQL)]
+    Worker[Background worker] --> DB
+    Worker -->|Scheduled HTTP checks| Targets[Monitored websites]
+```
+
+The web and worker containers use the same application image but run different commands:
+
+- `web` serves the dashboard and API through Uvicorn.
+- `worker` finds due monitors and performs scheduled checks.
+- `db` stores users, monitors, and check results in PostgreSQL.
+
+Docker Compose provides service discovery through the `db` hostname. PostgreSQL data is preserved in a named volume.
+
+## Technology stack
+
+### Application
+
+- Python 3.13
+- FastAPI and Uvicorn
+- SQLAlchemy
+- PostgreSQL and Psycopg
+- Pytest
+
+### DevOps
+
+- Docker
+- Docker Compose
+- GitLab CI/CD
+- GitLab Container Registry
+
+## Run with Docker Compose
+
+### Prerequisites
+
+- Docker Desktop or Docker Engine
+- Docker Compose v2
+
+Create a `.env` file in the project root:
+
+```dotenv
+POSTGRES_USER=pulsewatch_user
+POSTGRES_PASSWORD=replace-with-a-local-password
+POSTGRES_HOST=db
+POSTGRES_PORT=5432
+POSTGRES_DB=pulsewatch_db
+
+DATABASE_URL=postgresql+psycopg://pulsewatch_user:replace-with-a-local-password@db:5432/pulsewatch_db
+SESSION_SECRET=replace-with-a-long-random-value
+```
+
+The real `.env` file is excluded from Git and the Docker build context.
+
+Build the application image:
+
+```bash
+docker build -t image_test:v1 .
+```
+
+Start the complete stack:
+
+```bash
+docker compose up -d
+```
+
+Open the application at [http://localhost:8080](http://localhost:8080).
+
+Verify the services:
+
+```bash
+docker compose ps
+curl http://localhost:8080/api/health
+docker compose logs worker
+```
+
+Stop the stack:
+
+```bash
+docker compose down
+```
+
+Use the following command only when you intentionally want to delete the local PostgreSQL data:
+
+```bash
+docker compose down -v
+```
+
+## Run directly with Python
+
+Python 3.13 is recommended.
+
+```bash
+python3 -m venv .venv
+source .venv/bin/activate
 pip install -r requirements-dev.txt
-$env:SESSION_SECRET="change-this-secret"
+export SESSION_SECRET="replace-with-a-long-random-value"
 python manage.py runserver
 ```
 
-Открой `http://127.0.0.1:8000`.
+The direct local setup uses SQLite by default.
 
-Во втором терминале запусти worker для автоматических проверок:
+Start the background worker in another terminal:
 
-```powershell
-.venv\Scripts\Activate.ps1
+```bash
+source .venv/bin/activate
 python manage.py worker
 ```
 
-Без worker кнопка «Проверить сейчас» продолжает работать.
+Manual checks continue to work without the worker, but scheduled checks require it.
 
-## PostgreSQL
+## Tests
 
-По умолчанию используется SQLite. Для PostgreSQL достаточно задать переменную окружения:
+Run the automated tests with:
 
-```powershell
-$env:DATABASE_URL="postgresql+psycopg://user:password@localhost:5432/uptime"
-```
-
-Таблицы создаются при запуске. Для развития проекта следующим шагом стоит добавить Alembic.
-
-## Тесты
-
-```powershell
+```bash
 python manage.py test
 ```
 
-Дополнительные команды:
+## CI/CD pipeline
 
-```powershell
-python manage.py initdb
-python manage.py runserver --host 0.0.0.0 --port 8080
-python manage.py runserver --no-reload
+The GitLab CI/CD pipeline currently performs four stages:
+
+1. Installs Python dependencies and runs the application tests.
+2. Starts an isolated PostgreSQL service and verifies database connectivity.
+3. Builds the Docker image and publishes it to GitLab Container Registry using the commit SHA as the image tag.
+4. Pulls the published image to verify that it is available from the registry.
+
+The final stage currently verifies image delivery. It is not yet a production deployment.
+
+## Operational commands
+
+```bash
+# Display service status
+docker compose ps
+
+# Follow all service logs
+docker compose logs -f
+
+# Follow individual service logs
+docker compose logs -f web
+docker compose logs -f worker
+docker compose logs -f db
+
+# Recreate containers after configuration changes
+docker compose up -d --force-recreate
 ```
 
-## Что намеренно не добавлено
+## Security considerations
 
-Docker, CI/CD, Kubernetes, Terraform и мониторинг самого приложения не включены: это отдельная DevOps-часть проекта.
+- Secrets are supplied through environment variables and are not committed.
+- Session cookies are cryptographically signed using `SESSION_SECRET`.
+- Monitor targets are checked against private and local IP ranges to reduce SSRF risk.
+- PostgreSQL is available only through the internal Compose network by default.
+- The database volume is kept separate from the application containers.
+
+## Roadmap
+
+- Make Docker Compose build the application image from a clean clone
+- Run the application image as a non-root user
+- Add application readiness and container health checks
+- Add Alembic database migrations
+- Add dependency and container-image security scanning
+- Add Prometheus metrics, Grafana dashboards, and alerting
+- Deploy the application to a real environment
+- Add Kubernetes manifests or a Helm chart
+- Provision infrastructure using infrastructure as code
+
+## Project scope
+
+PulseWatch intentionally uses a small application so that the repository can demonstrate a complete DevOps lifecycle: packaging, testing, image delivery, orchestration, observability, deployment, and operational documentation.
