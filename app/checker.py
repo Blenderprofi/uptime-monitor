@@ -14,9 +14,9 @@ def normalize_url(value: str) -> str:
     value = value.strip()
     parsed = urlparse(value)
     if parsed.scheme not in {"http", "https"} or not parsed.hostname:
-        raise ValueError("URL должен начинаться с http:// или https://")
+        raise ValueError("URL must start with http:// or https://.")
     if parsed.username or parsed.password:
-        raise ValueError("URL с логином или паролем не поддерживается")
+        raise ValueError("URLs containing a username or password are not supported.")
     return value
 
 
@@ -24,19 +24,19 @@ def ensure_public_host(url: str) -> None:
     """Block requests to local networks to reduce SSRF risk."""
     hostname = urlparse(url).hostname
     if not hostname:
-        raise ValueError("Некорректный адрес")
+        raise ValueError("Invalid website address.")
 
     try:
         addresses = {item[4][0] for item in socket.getaddrinfo(hostname, None)}
     except socket.gaierror as exc:
-        raise ValueError("Не удалось найти адрес сайта") from exc
+        raise ValueError("Could not resolve the website address.") from exc
 
     if not addresses:
-        raise ValueError("Не удалось найти адрес сайта")
+        raise ValueError("Could not resolve the website address.")
 
     for address in addresses:
         if not ipaddress.ip_address(address).is_global:
-            raise ValueError("Локальные и внутренние адреса запрещены")
+            raise ValueError("Local and private network addresses are not allowed.")
 
 
 def run_monitor_check(db: Session, monitor: Monitor) -> Check:

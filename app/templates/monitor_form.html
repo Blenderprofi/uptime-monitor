@@ -1,21 +1,21 @@
 {% extends "base.html" %}
-{% block title %}Новый монитор — PulseWatch{% endblock %}
+{% block title %}New monitor — PulseWatch{% endblock %}
 {% block content %}
 <section class="form-card">
-    <p class="eyebrow">НОВЫЙ МОНИТОР</p><h1>Добавить сайт</h1>
+    <h1>Add website</h1>
     <form method="post" action="/monitors" class="stack-form">
         <input type="hidden" name="csrf" value="{{ csrf_token }}">
-        <label>Название<input name="name" value="{{ name or '' }}" maxlength="100" placeholder="Мой API" required></label>
+        <label>Name<input name="name" value="{{ name or '' }}" maxlength="100" placeholder="My API" required></label>
         <label>URL<input type="url" name="url" value="{{ url or '' }}" placeholder="https://example.com" required></label>
-        <label>Интервал
+        <label>Check interval
             <select name="interval_seconds">
-                <option value="30">30 секунд</option>
-                <option value="60" selected>1 минута</option>
-                <option value="300">5 минут</option>
-                <option value="900">15 минут</option>
+                <option value="30">30 seconds</option>
+                <option value="60" selected>1 minute</option>
+                <option value="300">5 minutes</option>
+                <option value="900">15 minutes</option>
             </select>
         </label>
-        <button class="button" type="submit">Сохранить</button>
+        <button class="button" type="submit">Add website</button>
     </form>
 </section>
 {% endblock %}

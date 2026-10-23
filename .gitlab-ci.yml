@@ -76,7 +76,7 @@ deploy:
       SESSION_SECRET=$APP_SECRET
       EOF
 
-    # 2. Login to GitLab Registry
+    # login to GitLab Registry
     - |
       echo "$CI_REGISTRY_PASSWORD" |
       docker login "$CI_REGISTRY" \

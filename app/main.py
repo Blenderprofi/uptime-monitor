@@ -1,5 +1,7 @@
 import os
 from contextlib import asynccontextmanager
+from datetime import UTC
+from math import ceil
 from pathlib import Path
 
 from fastapi import Depends, FastAPI, Form, HTTPException, Request, status
@@ -57,6 +59,52 @@ def monitor_for_user(db: Session, monitor_id: int, user: User) -> Monitor:
     return monitor
 
 
+def monitor_snapshot(db: Session, monitor: Monitor) -> dict:
+    """Use one history view for the initial page and its live updates."""
+    checks = db.scalars(
+        select(Check)
+        .where(Check.monitor_id == monitor.id)
+        .order_by(Check.checked_at.desc(), Check.id.desc())
+        .limit(50)
+    ).all()
+    total, successful = db.execute(
+        select(func.count(Check.id), func.count(Check.id).filter(Check.is_available.is_(True)))
+        .where(Check.monitor_id == monitor.id)
+    ).one()
+    maximum = max((check.response_time_ms or 0 for check in checks), default=0)
+    chart_max_ms = max(100, ceil(maximum / 100) * 100)
+
+    def utc_time(value):
+        # SQLite returns naive datetimes; stored check timestamps are UTC.
+        return value.replace(tzinfo=UTC) if value.tzinfo is None else value.astimezone(UTC)
+
+    return {
+        "monitor": {
+            "id": monitor.id,
+            "is_active": monitor.is_active,
+            "is_available": monitor.last_available,
+            "status_code": monitor.last_status_code,
+        },
+        "total_checks": total,
+        "uptime": round(successful / total * 100, 2) if total else None,
+        "chart_max_ms": chart_max_ms,
+        "checks": [
+            {
+                "id": check.id,
+                "checked_at": utc_time(check.checked_at).isoformat(),
+                "checked_at_label": utc_time(check.checked_at).strftime("%Y-%m-%d %H:%M:%S UTC"),
+                "time_label": utc_time(check.checked_at).strftime("%H:%M:%S"),
+                "is_available": check.is_available,
+                "status_code": check.status_code,
+                "response_time_ms": check.response_time_ms,
+                "error_message": check.error_message,
+                "chart_height": (check.response_time_ms or 0) / chart_max_ms * 100,
+            }
+            for check in checks
+        ],
+    }
+
+
 def page_context(request: Request, db: Session, **values):
     values.update(
         request=request,
@@ -91,11 +139,11 @@ def register(
     email = email.strip().lower()
     error = None
     if not EMAIL_PATTERN.match(email):
-        error = "Введите корректный email"
+        error = "Enter a valid email address."
     elif len(password) < 8:
-        error = "Пароль должен содержать минимум 8 символов"
+        error = "Password must be at least 8 characters."
     elif db.scalar(select(User).where(User.email == email)):
-        error = "Пользователь с таким email уже существует"
+        error = "An account with this email already exists."
 
     if error:
         context = page_context(request, db, error=error, email=email)
@@ -106,7 +154,7 @@ def register(
     db.commit()
     db.refresh(user)
     request.session["user_id"] = user.id
-    request.session["message"] = "Аккаунт создан"
+    request.session["message"] = "Account created."
     return RedirectResponse("/dashboard", status_code=303)
 
 
@@ -126,7 +174,7 @@ def login(
     verify_csrf(request, csrf)
     user = db.scalar(select(User).where(User.email == email.strip().lower()))
     if not user or not verify_password(password, user.password_hash):
-        context = page_context(request, db, error="Неверный email или пароль", email=email)
+        context = page_context(request, db, error="Incorrect email or password.", email=email)
         return templates.TemplateResponse(request, "login.html", context, status_code=400)
     request.session["user_id"] = user.id
     return RedirectResponse("/dashboard", status_code=303)
@@ -181,14 +229,14 @@ def create_monitor(
 
     monitor = Monitor(
         user_id=user.id,
-        name=name.strip()[:100] or "Без названия",
+        name=name.strip()[:100] or "Untitled monitor",
         url=url,
         interval_seconds=interval_seconds,
     )
     db.add(monitor)
     db.commit()
     db.refresh(monitor)
-    request.session["message"] = "Монитор добавлен"
+    request.session["message"] = "Monitor added."
     return RedirectResponse(f"/monitors/{monitor.id}", status_code=303)
 
 
@@ -196,31 +244,8 @@ def create_monitor(
 def monitor_detail(monitor_id: int, request: Request, db: Session = Depends(get_db)):
     user = require_user(request, db)
     monitor = monitor_for_user(db, monitor_id, user)
-    checks = db.scalars(
-        select(Check)
-        .where(Check.monitor_id == monitor.id)
-        .order_by(Check.checked_at.desc())
-        .limit(50)
-    ).all()
-    check_rows = [
-        {
-            "check": check,
-            "bar_width": min(max((check.response_time_ms or 0) / 20, 2), 100),
-        }
-        for check in checks
-    ]
-    total = db.scalar(select(func.count(Check.id)).where(Check.monitor_id == monitor.id)) or 0
-    successful = (
-        db.scalar(
-            select(func.count(Check.id)).where(
-                Check.monitor_id == monitor.id, Check.is_available.is_(True)
-            )
-        )
-        or 0
-    )
-    uptime = round(successful / total * 100, 2) if total else None
     context = page_context(
-        request, db, monitor=monitor, check_rows=check_rows, uptime=uptime
+        request, db, monitor=monitor, snapshot=monitor_snapshot(db, monitor)
     )
     return templates.TemplateResponse(request, "monitor_detail.html", context)
 
@@ -236,7 +261,6 @@ def check_now(
     user = require_user(request, db)
     monitor = monitor_for_user(db, monitor_id, user)
     run_monitor_check(db, monitor)
-    request.session["message"] = "Проверка выполнена"
     return RedirectResponse(f"/monitors/{monitor.id}", status_code=303)
 
 
@@ -267,7 +291,7 @@ def delete_monitor(
     monitor = monitor_for_user(db, monitor_id, user)
     db.delete(monitor)
     db.commit()
-    request.session["message"] = "Монитор удалён"
+    request.session["message"] = "Monitor deleted."
     return RedirectResponse("/dashboard", status_code=303)
 
 
@@ -292,6 +316,13 @@ def api_monitors(request: Request, db: Session = Depends(get_db)):
         }
         for monitor in monitors
     ]
+
+
+@app.get("/api/monitors/{monitor_id}/checks")
+def api_monitor_checks(monitor_id: int, request: Request, db: Session = Depends(get_db)):
+    user = require_user(request, db)
+    monitor = monitor_for_user(db, monitor_id, user)
+    return JSONResponse(monitor_snapshot(db, monitor), headers={"Cache-Control": "no-store"})
 
 
 @app.exception_handler(401)

@@ -24,15 +24,15 @@ def run_due_checks() -> int:
 
 def main() -> None:
     Base.metadata.create_all(bind=engine)
-    print("Worker запущен. Для остановки нажмите Ctrl+C.")
+    print("Worker started. Press Ctrl+C to stop.")
     try:
         while True:
             checked = run_due_checks()
             if checked:
-                print(f"Проверено сайтов: {checked}")
+                print(f"Websites checked: {checked}")
             time.sleep(5)
     except KeyboardInterrupt:
-        print("Worker остановлен.")
+        print("Worker stopped.")
 
 
 if __name__ == "__main__":

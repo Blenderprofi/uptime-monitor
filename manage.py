@@ -22,10 +22,10 @@ def run_worker(_: argparse.Namespace) -> None:
 
 def init_database(_: argparse.Namespace) -> None:
     from app.database import Base, engine
-    from app import models  # noqa: F401 - импорт регистрирует модели
+    from app import models  # noqa: F401 - import registers the models
 
     Base.metadata.create_all(bind=engine)
-    print("База данных подготовлена.")
+    print("Database initialized.")
 
 
 def run_tests(_: argparse.Namespace) -> None:
@@ -34,22 +34,22 @@ def run_tests(_: argparse.Namespace) -> None:
 
 
 def build_parser() -> argparse.ArgumentParser:
-    parser = argparse.ArgumentParser(description="Управление PulseWatch")
+    parser = argparse.ArgumentParser(description="Manage PulseWatch")
     commands = parser.add_subparsers(dest="command", required=True)
 
-    server = commands.add_parser("runserver", help="Запустить веб-сервер")
+    server = commands.add_parser("runserver", help="Start the web server")
     server.add_argument("--host", default="127.0.0.1")
     server.add_argument("--port", type=int, default=8000)
     server.add_argument("--no-reload", action="store_true")
     server.set_defaults(handler=runserver)
 
-    worker = commands.add_parser("worker", help="Запустить фоновые проверки")
+    worker = commands.add_parser("worker", help="Run background checks")
     worker.set_defaults(handler=run_worker)
 
-    initdb = commands.add_parser("initdb", help="Создать таблицы базы данных")
+    initdb = commands.add_parser("initdb", help="Create database tables")
     initdb.set_defaults(handler=init_database)
 
-    tests = commands.add_parser("test", help="Запустить тесты")
+    tests = commands.add_parser("test", help="Run tests")
     tests.set_defaults(handler=run_tests)
     return parser
 
