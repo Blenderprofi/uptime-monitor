@@ -5,3 +5,4 @@ __pycache__/
 *.db
 .pytest_cache/
 
+k8s/02-secret.yaml
