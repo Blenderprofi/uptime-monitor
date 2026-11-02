@@ -1,130 +1,364 @@
+# PulseWatch CI/CD: from commit to production on AWS EKS
+#
+#   validate ─▶ test ─▶ build ─▶ scan ─▶ infrastructure ─▶ staging ─▶ production
+#                                       (Terraform)       (auto)     (manual)
+#
+# Merge requests run everything up to "scan" and never touch AWS.
+# The default branch additionally:
+#   • plans Terraform when terraform/ changed and waits for a manual "apply",
+#   • deploys the freshly built image to staging and smoke-tests it,
+#   • promotes the SAME image to production after a manual approval.
+#
+# AWS access uses short-lived OIDC credentials (no access keys stored in GitLab).
+# Full walkthrough: docs/deployment.md
+
+include:
+  - template: Jobs/SAST.gitlab-ci.yml
+  - template: Jobs/Secret-Detection.gitlab-ci.yml
+
 stages:
-  - app
-  - db
+  - validate
+  - test
   - build
-  - deploy
+  - scan
+  - infrastructure
+  - staging
+  - production
+  - teardown
 
-app:
-  stage: app
-  image: python:3.13-slim
-  script:
-    - pip --version
-    - python --version
-    - pip install -r requirements.txt
-    - pip install -r requirements-dev.txt
-    - python manage.py test
-    - python -c "import fastapi; import uvicorn; import psycopg; import redis; import rq; import celery; import sqlalchemy; print('All dependencies are installed and importable')"
+workflow:
+  rules:
+    - if: $CI_PIPELINE_SOURCE == "merge_request_event"
+    - if: $CI_COMMIT_BRANCH && $CI_OPEN_MERGE_REQUESTS
+      when: never # avoid duplicate branch + MR pipelines
+    - if: $CI_COMMIT_BRANCH
 
-db:
-  stage: db
-  image: python:3.13-slim
-  services:
-    - name: postgres:16-alpine
-      alias: db
+variables:
+  # Immutable image tag: what is tested is exactly what reaches production.
+  APP_IMAGE: "$CI_REGISTRY_IMAGE:$CI_COMMIT_SHORT_SHA"
+  AWS_REGION: "eu-central-1" # keep in sync with terraform var.aws_region
+  AWS_DEFAULT_REGION: "$AWS_REGION"
+  CLUSTER_NAME: "pulsewatch" # = terraform var.project
+  TF_ROOT: "terraform"
+  TF_STATE_NAME: "pulsewatch"
+  # Pinned tool images
+  PYTHON_IMAGE: "python:3.13-slim"
+  POSTGRES_IMAGE: "postgres:16-alpine"
+  TERRAFORM_IMAGE: "hashicorp/terraform:1.17.1"
+  KUBE_IMAGE: "alpine/k8s:1.35.10" # kubectl, kustomize, kubeconform, aws-cli, curl
+  TRIVY_IMAGE: "aquasec/trivy:0.76.1"
+  PIP_CACHE_DIR: "$CI_PROJECT_DIR/.cache/pip"
 
+# ---------------------------------------------------------------------------
+# Reusable building blocks
+# ---------------------------------------------------------------------------
+
+# Cloud jobs run only on the default branch, and only once AWS_ROLE_ARN is
+# configured (so forks and fresh clones still get a green pipeline).
+.rules:
+  cloud: &cloud_rule
+    if: $CI_COMMIT_BRANCH == $CI_DEFAULT_BRANCH && $AWS_ROLE_ARN
+
+.pip_cache:
+  cache:
+    key:
+      files: [requirements.txt, requirements-dev.txt]
+    paths: [.cache/pip]
+
+# GitLab signs a JWT for the job; AWS STS exchanges it for temporary credentials
+# of the role in AWS_ROLE_ARN. The AWS CLI and Terraform pick these up from env vars.
+.aws_oidc:
+  id_tokens:
+    GITLAB_OIDC_TOKEN:
+      aud: https://gitlab.com
   variables:
-    POSTGRES_USER: "mansur_admin"
-    POSTGRES_PASSWORD: "123"
-    POSTGRES_DB: "uptime_monitor"
-    POSTGRES_HOST: "db"
-    POSTGRES_PORT: "5432"
-  script:
-    - pip --version
-    - pip install -r requirements.txt
-    - python -c "import psycopg; conn = psycopg.connect(host='$POSTGRES_HOST', port='$POSTGRES_PORT', dbname='$POSTGRES_DB', user='$POSTGRES_USER', password='$POSTGRES_PASSWORD'); print('PostgreSQL connection successful'); conn.close()"
-
-build:
-  stage: build
-  image: docker:27-cli
-  services:
-    - docker:27-dind
-  variables:
-    IMAGE_TAG: "$CI_COMMIT_SHORT_SHA"
-  script:
-    - docker --version
-    - docker login -u "$CI_REGISTRY_USER" -p "$CI_REGISTRY_PASSWORD" "$CI_REGISTRY"
-    - docker build -t "$CI_REGISTRY_IMAGE:$IMAGE_TAG" .
-    - docker push "$CI_REGISTRY_IMAGE:$IMAGE_TAG"
-  
-deploy:
-  stage: deploy
-  image: docker:27-cli
-
-  services:
-    - name: docker:27-dind
-      alias: docker
-
-  variables:
-    DOCKER_HOST: tcp://docker:2375
-    DOCKER_TLS_CERTDIR: ""
-    IMAGE_TAG: "$CI_COMMIT_SHORT_SHA"
-
+    AWS_WEB_IDENTITY_TOKEN_FILE: /tmp/gitlab-oidc-token
+    AWS_ROLE_SESSION_NAME: "gitlab-$CI_PROJECT_ID-$CI_JOB_ID"
   before_script:
-    - apk add --no-cache openssl
-    - docker info
+    - printf '%s' "$GITLAB_OIDC_TOKEN" > "$AWS_WEB_IDENTITY_TOKEN_FILE"
 
+.terraform:
+  extends: .aws_oidc
+  image:
+    name: $TERRAFORM_IMAGE
+    entrypoint: [""]
+  resource_group: terraform # one Terraform job at a time, across all pipelines
+  variables:
+    TF_IN_AUTOMATION: "true"
+    TF_INPUT: "false"
+    TF_VAR_aws_region: $AWS_REGION
+    TF_VAR_cluster_admin_arns: '["$AWS_ROLE_ARN"]'
+    TF_PLUGIN_CACHE_DIR: "$CI_PROJECT_DIR/.cache/terraform-plugins"
+    # GitLab-managed Terraform state (HTTP backend with locking)
+    TF_HTTP_ADDRESS: "$CI_API_V4_URL/projects/$CI_PROJECT_ID/terraform/state/$TF_STATE_NAME"
+    TF_HTTP_LOCK_ADDRESS: "$CI_API_V4_URL/projects/$CI_PROJECT_ID/terraform/state/$TF_STATE_NAME/lock"
+    TF_HTTP_UNLOCK_ADDRESS: "$CI_API_V4_URL/projects/$CI_PROJECT_ID/terraform/state/$TF_STATE_NAME/lock"
+    TF_HTTP_LOCK_METHOD: "POST"
+    TF_HTTP_UNLOCK_METHOD: "DELETE"
+    TF_HTTP_USERNAME: "gitlab-ci-token"
+    TF_HTTP_RETRY_WAIT_MIN: "5"
+  cache:
+    key: terraform-plugins
+    paths: [.cache/terraform-plugins]
+  before_script:
+    - !reference [.aws_oidc, before_script]
+    - export TF_HTTP_PASSWORD="$CI_JOB_TOKEN"
+    # The Kubernetes provider authenticates to EKS with `aws eks get-token`.
+    - apk add --no-cache aws-cli
+    - mkdir -p "$TF_PLUGIN_CACHE_DIR"
+    - cd "$TF_ROOT"
+    - terraform init
+
+.deploy:
+  extends: .aws_oidc
+  image:
+    name: $KUBE_IMAGE
+    entrypoint: [""]
+  dependencies: [] # needs no artifacts from earlier jobs
+  script:
+    - bash ci/deploy.sh "$CI_ENVIRONMENT_NAME"
+  artifacts:
+    reports:
+      dotenv: deploy.env # APP_URL → environment link + smoke test
+
+.smoke_test:
+  image:
+    name: $KUBE_IMAGE
+    entrypoint: [""]
+  script:
+    - bash ci/smoke-test.sh "$APP_URL"
+
+# ---------------------------------------------------------------------------
+# validate: static checks, no credentials needed
+# ---------------------------------------------------------------------------
+terraform:validate:
+  stage: validate
+  image:
+    name: $TERRAFORM_IMAGE
+    entrypoint: [""]
+  variables:
+    TF_IN_AUTOMATION: "true"
+    TF_PLUGIN_CACHE_DIR: "$CI_PROJECT_DIR/.cache/terraform-plugins"
+  cache:
+    key: terraform-plugins
+    paths: [.cache/terraform-plugins]
+  script:
+    - mkdir -p "$TF_PLUGIN_CACHE_DIR"
+    - terraform fmt -check -recursive -diff terraform
+    - terraform -chdir=terraform/bootstrap init -backend=false
+    - terraform -chdir=terraform/bootstrap validate
+    - terraform -chdir=terraform init -backend=false
+    - terraform -chdir=terraform validate
+    # Unit tests against mocked AWS/Kubernetes providers (terraform/tests/)
+    - terraform -chdir=terraform test
+
+k8s:validate:
+  stage: validate
+  image:
+    name: $KUBE_IMAGE
+    entrypoint: [""]
   script:
     - |
-      DB_PASSWORD=$(openssl rand -hex 24)
-      APP_SECRET=$(openssl rand -hex 32)
+      for target in platform overlays/staging overlays/production; do
+        echo "== k8s/$target"
+        # IngressClassParams is an EKS-only CRD without a public schema.
+        kustomize build "k8s/$target" | kubeconform -strict -summary -skip IngressClassParams
+      done
 
-      cat > .env <<EOF
-      POSTGRES_USER=pulsewatch_ci
-      POSTGRES_PASSWORD=$DB_PASSWORD
-      POSTGRES_DB=pulsewatch_ci
-      DATABASE_URL=postgresql+psycopg://pulsewatch_ci:$DB_PASSWORD@db:5432/pulsewatch_ci
-      SESSION_SECRET=$APP_SECRET
-      EOF
+scan:iac:
+  stage: validate
+  image:
+    name: $TRIVY_IMAGE
+    entrypoint: [""]
+  variables:
+    TRIVY_CACHE_DIR: "$CI_PROJECT_DIR/.cache/trivy"
+  cache:
+    key: trivy
+    paths: [.cache/trivy]
+  script:
+    # Misconfiguration report for Terraform, Kubernetes manifests and the Dockerfile.
+    # Informational: accepted findings are explained in docs/deployment.md.
+    - trivy config --exit-code 0 --severity MEDIUM,HIGH,CRITICAL --skip-dirs .cache .
+  allow_failure: true
 
-    # login to GitLab Registry
+# ---------------------------------------------------------------------------
+# test
+# ---------------------------------------------------------------------------
+test:unit:
+  stage: test
+  image: $PYTHON_IMAGE
+  extends: .pip_cache
+  script:
+    - pip install -r requirements-dev.txt
+    - python -m pytest --junitxml=report.xml
+  artifacts:
+    when: always
+    reports:
+      junit: report.xml
+
+# Same PostgreSQL major version as RDS: catches SQL/driver issues SQLite would hide.
+test:postgres:
+  stage: test
+  image: $PYTHON_IMAGE
+  extends: .pip_cache
+  services:
+    - name: $POSTGRES_IMAGE
+      alias: db
+  variables:
+    POSTGRES_USER: "pulsewatch"
+    POSTGRES_PASSWORD: "ci-only-throwaway" # disposable service container for this job only
+    POSTGRES_DB: "pulsewatch"
+    DATABASE_URL: "postgresql+psycopg://pulsewatch:ci-only-throwaway@db:5432/pulsewatch"
+  script:
+    - pip install -r requirements.txt
+    - python manage.py initdb
     - |
-      echo "$CI_REGISTRY_PASSWORD" |
-      docker login "$CI_REGISTRY" \
-        -u "$CI_REGISTRY_USER" \
-        --password-stdin
+      python - <<'PY'
+      from fastapi.testclient import TestClient
+      from sqlalchemy import inspect
 
-    - docker pull "$CI_REGISTRY_IMAGE:$IMAGE_TAG"
-    - docker tag "$CI_REGISTRY_IMAGE:$IMAGE_TAG" image_test:v1
-    - docker compose up -d --wait --wait-timeout 120
-    - docker compose ps
-
-    #application health test
-    - |
-      docker compose exec -T web python -c "
-      import time
-      import urllib.request
-
-      for attempt in range(20):
-          try:
-              response = urllib.request.urlopen(
-                  'http://127.0.0.1:8000/api/health',
-                  timeout=3
-              )
-              assert response.status == 200
-              print('Application is healthy')
-              break
-          except Exception:
-              if attempt == 19:
-                  raise
-              time.sleep(2)
-      "
-
-    #postgresql connection test
-    - |
-      docker compose exec -T web python -c "
-      from sqlalchemy import text
       from app.database import engine
+      from app.main import app
 
-      with engine.connect() as conn:
-          result = conn.execute(text('SELECT 1')).scalar()
-          assert result == 1
-          print('PostgreSQL connection successful')
-      "
+      tables = set(inspect(engine).get_table_names())
+      assert {"users", "monitors", "checks"} <= tables, f"missing tables: {tables}"
+      with TestClient(app) as client:
+          response = client.get("/api/ready")
+      assert response.status_code == 200, response.text
+      print("PostgreSQL schema and readiness check OK:", sorted(tables))
+      PY
 
-  after_script:
-    - docker compose logs --no-color || true
-    - docker compose down -v --remove-orphans || true
+# ---------------------------------------------------------------------------
+# build: one image per commit, pushed to the GitLab Container Registry
+# ---------------------------------------------------------------------------
+build:image:
+  stage: build
+  image: docker:29-cli
+  services:
+    - docker:29-dind
+  variables:
+    DOCKER_TLS_CERTDIR: "/certs"
+  before_script:
+    - echo "$CI_REGISTRY_PASSWORD" | docker login "$CI_REGISTRY" -u "$CI_REGISTRY_USER" --password-stdin
+  script:
+    - >-
+      docker build --pull
+      --label "org.opencontainers.image.revision=$CI_COMMIT_SHA"
+      --label "org.opencontainers.image.source=$CI_PROJECT_URL"
+      --tag "$APP_IMAGE" .
+    - docker push "$APP_IMAGE"
 
+# ---------------------------------------------------------------------------
+# scan: vulnerability gate on the exact image that will be deployed
+# ---------------------------------------------------------------------------
+scan:image:
+  stage: scan
+  image:
+    name: $TRIVY_IMAGE
+    entrypoint: [""]
+  variables:
+    TRIVY_USERNAME: "$CI_REGISTRY_USER"
+    TRIVY_PASSWORD: "$CI_REGISTRY_PASSWORD"
+    TRIVY_CACHE_DIR: "$CI_PROJECT_DIR/.cache/trivy"
+    TRIVY_NO_PROGRESS: "true"
+  cache:
+    key: trivy
+    paths: [.cache/trivy]
+  script:
+    # Report everything HIGH and above...
+    - trivy image --exit-code 0 --severity HIGH,CRITICAL "$APP_IMAGE"
+    # ...but only block delivery on CRITICAL vulnerabilities that already have a fix.
+    - trivy image --exit-code 1 --severity CRITICAL --ignore-unfixed "$APP_IMAGE"
 
+# ---------------------------------------------------------------------------
+# infrastructure: Terraform plan → human review → apply
+# ---------------------------------------------------------------------------
+terraform:plan:
+  extends: .terraform
+  stage: infrastructure
+  rules:
+    - <<: *cloud_rule
+      changes: [terraform/**/*]
+    - if: $CI_COMMIT_BRANCH == $CI_DEFAULT_BRANCH && $AWS_ROLE_ARN && $CI_PIPELINE_SOURCE == "web"
+  script:
+    - terraform plan -out=plan.cache
+    - terraform show -no-color plan.cache > plan.txt
+  artifacts:
+    access: developer # the plan can contain sensitive values
+    expire_in: 1 week
+    paths:
+      - terraform/plan.cache
+      - terraform/plan.txt
 
-    
+terraform:apply:
+  extends: .terraform
+  stage: infrastructure
+  needs: [terraform:plan]
+  rules:
+    - <<: *cloud_rule
+      changes: [terraform/**/*]
+      when: manual
+    - if: $CI_COMMIT_BRANCH == $CI_DEFAULT_BRANCH && $AWS_ROLE_ARN && $CI_PIPELINE_SOURCE == "web"
+      when: manual
+  script:
+    # Applies exactly the reviewed plan; fails if the state changed since.
+    - terraform apply plan.cache
+
+# ---------------------------------------------------------------------------
+# staging: automatic deploy of every default-branch commit
+# ---------------------------------------------------------------------------
+deploy:staging:
+  extends: .deploy
+  stage: staging
+  resource_group: staging
+  environment:
+    name: staging
+    url: $APP_URL
+    deployment_tier: staging
+  rules:
+    - *cloud_rule
+
+smoke:staging:
+  extends: .smoke_test
+  stage: staging
+  needs: [deploy:staging]
+  rules:
+    - *cloud_rule
+
+# ---------------------------------------------------------------------------
+# production: manual promotion of the image that passed staging
+# ---------------------------------------------------------------------------
+deploy:production:
+  extends: .deploy
+  stage: production
+  resource_group: production
+  environment:
+    name: production
+    url: $APP_URL
+    deployment_tier: production
+  rules:
+    - <<: *cloud_rule
+      when: manual
+  manual_confirmation: "Promote this build (already verified on staging) to production?"
+
+smoke:production:
+  extends: .smoke_test
+  stage: production
+  needs: [deploy:production]
+  rules:
+    - *cloud_rule
+
+# ---------------------------------------------------------------------------
+# teardown: remove everything to stop AWS costs (manual, with confirmation)
+# ---------------------------------------------------------------------------
+terraform:destroy:
+  extends: .terraform
+  stage: teardown
+  needs: []
+  rules:
+    - <<: *cloud_rule
+      when: manual
+      allow_failure: true
+  manual_confirmation: "Destroy the EKS cluster, the VPC and BOTH databases including their data?"
+  script:
+    - terraform destroy -auto-approve

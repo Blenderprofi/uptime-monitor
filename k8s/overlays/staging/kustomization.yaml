@@ -1,0 +1,30 @@
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+
+# Namespace, Secret and Pod Security labels are created by Terraform.
+namespace: pulsewatch-staging
+
+resources:
+  - ../../base
+
+labels:
+  - pairs:
+      app.kubernetes.io/instance: pulsewatch-staging
+      environment: staging
+    includeSelectors: false
+    includeTemplates: true
+
+# Staging runs small: one web pod that may scale to two.
+patches:
+  - target:
+      kind: HorizontalPodAutoscaler
+      name: pulsewatch-web
+    patch: |-
+      - op: replace
+        path: /spec/minReplicas
+        value: 1
+      - op: replace
+        path: /spec/maxReplicas
+        value: 2
+
+# The pipeline runs `kustomize edit set image pulsewatch=<registry>/<image>:<commit-sha>` here.

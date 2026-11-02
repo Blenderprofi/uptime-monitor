@@ -7,3 +7,13 @@ __pycache__/
 
 k8s/02-secret.yaml
 .DS_Store
+
+# Terraform
+.terraform/
+*.tfstate
+*.tfstate.*
+*.tfvars
+!*.tfvars.example
+plan.cache
+plan.txt
+crash.log

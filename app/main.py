@@ -9,6 +9,7 @@ from fastapi.responses import HTMLResponse, JSONResponse, RedirectResponse
 from fastapi.staticfiles import StaticFiles
 from fastapi.templating import Jinja2Templates
 from sqlalchemy import func, select
+from sqlalchemy.exc import SQLAlchemyError
 from sqlalchemy.orm import Session
 from starlette.middleware.sessions import SessionMiddleware
 
@@ -297,7 +298,18 @@ def delete_monitor(
 
 @app.get("/api/health")
 def health():
+    """Liveness: the process is up. Deliberately does not touch the database."""
     return {"status": "ok"}
+
+
+@app.get("/api/ready")
+def ready(db: Session = Depends(get_db)):
+    """Readiness: the instance can serve traffic, which requires the database."""
+    try:
+        db.execute(select(1))
+    except SQLAlchemyError:
+        return JSONResponse({"status": "unavailable", "database": "down"}, status_code=503)
+    return {"status": "ready", "database": "ok"}
 
 
 @app.get("/api/monitors")

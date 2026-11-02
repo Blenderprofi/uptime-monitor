@@ -1,0 +1,26 @@
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+
+# Environment-agnostic application manifests. Overlays add the namespace and
+# per-environment sizing; the pipeline pins the image to the commit SHA.
+#
+# Every object carries `app.kubernetes.io/component` (shared | migration | web | worker),
+# which ci/deploy.sh uses to apply them in order.
+
+labels:
+  - pairs:
+      app.kubernetes.io/name: pulsewatch
+      app.kubernetes.io/part-of: pulsewatch
+      app.kubernetes.io/managed-by: kustomize
+    includeSelectors: false
+    includeTemplates: true
+
+resources:
+  - serviceaccount.yaml
+  - migrate-job.yaml
+  - web-deployment.yaml
+  - web-service.yaml
+  - web-ingress.yaml
+  - web-hpa.yaml
+  - web-pdb.yaml
+  - worker-deployment.yaml

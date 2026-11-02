@@ -1,0 +1,61 @@
+# The scheduler loop picks up due monitors without row locking, so two workers
+# would check the same site twice. Hence exactly one replica, and `Recreate`
+# so the old pod is gone before the new one starts.
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: pulsewatch-worker
+  labels:
+    app.kubernetes.io/component: worker
+spec:
+  replicas: 1
+  revisionHistoryLimit: 5
+  strategy:
+    type: Recreate
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: pulsewatch
+      app.kubernetes.io/component: worker
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: pulsewatch
+        app.kubernetes.io/component: worker
+    spec:
+      serviceAccountName: pulsewatch
+      automountServiceAccountToken: false
+      terminationGracePeriodSeconds: 30
+      nodeSelector:
+        kubernetes.io/arch: amd64
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 10001
+        runAsGroup: 10001
+        seccompProfile:
+          type: RuntimeDefault
+      containers:
+        - name: worker
+          image: pulsewatch
+          command: ["python", "manage.py", "worker"]
+          envFrom:
+            - secretRef:
+                name: pulsewatch-app
+          resources:
+            requests:
+              cpu: 50m
+              memory: 128Mi
+            limits:
+              cpu: 250m
+              memory: 256Mi
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities:
+              drop: ["ALL"]
+          volumeMounts:
+            - name: tmp
+              mountPath: /tmp
+      volumes:
+        - name: tmp
+          emptyDir:
+            sizeLimit: 64Mi

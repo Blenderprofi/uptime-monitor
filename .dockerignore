@@ -5,3 +5,12 @@ __pycache__/
 *.db
 .pytest_cache/
 
+
+# Infrastructure and pipeline code does not belong in the runtime image
+.git/
+.gitlab-ci.yml
+.idea/
+ci/
+docs/
+k8s/
+terraform/

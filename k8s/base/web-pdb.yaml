@@ -1,0 +1,14 @@
+# Node upgrades/consolidation may evict at most one web pod at a time.
+# `maxUnavailable` (not `minAvailable: 1`) so a single-replica environment can still be drained.
+apiVersion: policy/v1
+kind: PodDisruptionBudget
+metadata:
+  name: pulsewatch-web
+  labels:
+    app.kubernetes.io/component: web
+spec:
+  maxUnavailable: 1
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: pulsewatch
+      app.kubernetes.io/component: web

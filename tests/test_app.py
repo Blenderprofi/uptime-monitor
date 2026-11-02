@@ -52,6 +52,35 @@ def test_health_endpoint():
     assert response.json() == {"status": "ok"}
 
 
+def test_readiness_endpoint_checks_database():
+    with TestClient(app) as client:
+        response = client.get("/api/ready")
+    assert response.status_code == 200
+    assert response.json() == {"status": "ready", "database": "ok"}
+
+
+def test_readiness_endpoint_reports_database_outage():
+    from sqlalchemy.exc import OperationalError
+
+    from app.database import get_db
+
+    class BrokenSession:
+        def execute(self, *_):
+            raise OperationalError("SELECT 1", {}, Exception("connection refused"))
+
+    app.dependency_overrides[get_db] = lambda: BrokenSession()
+    try:
+        with TestClient(app) as client:
+            response = client.get("/api/ready")
+            health = client.get("/api/health")
+    finally:
+        app.dependency_overrides.clear()
+    assert response.status_code == 503
+    assert response.json()["database"] == "down"
+    # Liveness must stay green so Kubernetes does not restart pods during a DB outage.
+    assert health.status_code == 200
+
+
 def test_register_and_create_monitor():
     with TestClient(app) as client:
         response = register(client)

@@ -1,0 +1,7 @@
+# cp terraform.tfvars.example terraform.tfvars   (terraform.tfvars is git-ignored)
+gitlab_project_path = "your-group/uptime-monitor"
+gitlab_branch       = "main"
+aws_region          = "eu-central-1"
+
+# gitlab_url           = "https://gitlab.example.com"  # self-managed GitLab
+# create_oidc_provider = false                         # account already trusts this GitLab
